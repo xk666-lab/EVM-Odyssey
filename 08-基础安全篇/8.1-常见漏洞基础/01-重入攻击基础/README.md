@@ -94,7 +94,7 @@ contract Vault {
 ```
 
 **为什么有漏洞？**
-1. ❌ **先转账**：`msg.sender.call{value: amount}("")` 会触发接收方的 `receive` 或 `fallback` 函数
+1. ❌ **先转账**：`msg.sender.call{value: amount}("")` 会触发接收方的 `receive` 或 `fallback` 函数,这是一个单线程的操作，他不会执行接下来的操作，而是去执行receive函数中的
 2. ❌ **后更新状态**：`balances[msg.sender]` 在转账后才更新
 3. ⚠️ **攻击窗口**：在转账和更新余额之间，攻击者可以再次调用 `withdraw`
 
@@ -154,24 +154,24 @@ contract Attack {
 
 1️⃣ Attack.attack() 
    └─> Vault.withdraw(1 ether) [第1次调用]
-       ├─ require(balances[Attack] > 1 ether) ✅ (1 > 1? false，但这里代码有bug)
+       ├─ require(balances[Attack] >= 1 ether) ✅ 
        ├─ msg.sender.call{value: 1 ether}
        │  └─> 触发 Attack.receive()
        │      ├─ address(vault).balance >= 1 ether? ✅ (2 ETH >= 1 ETH)
        │      └─> Vault.withdraw(1 ether) [第2次调用！重入！]
-       │          ├─ require(balances[Attack] > 1 ether) ✅ (余额还没更新！)
+       │          ├─ require(balances[Attack] >= 1 ether) ✅ (余额还没更新！)
        │          ├─ msg.sender.call{value: 1 ether}
        │          │  └─> 触发 Attack.receive()
        │          │      ├─ address(vault).balance >= 1 ether? ✅ (1 ETH >= 1 ETH)
        │          │      └─> Vault.withdraw(1 ether) [第3次调用！]
-       │          │          ├─ require(balances[Attack] > 1 ether) ✅
+       │          │          ├─ require(balances[Attack] > =1 ether) ✅
        │          │          ├─ msg.sender.call{value: 1 ether}
        │          │          │  └─> 触发 Attack.receive()
        │          │          │      └─ address(vault).balance >= 1 ether? ❌ (0 ETH < 1 ETH)
        │          │          │      └─ 停止重入
-       │          │          └─ balances[Attack] = 0 ⚠️ [第3次更新]
-       │          └─ balances[Attack] = 0 - 1 ⚠️ [第2次更新，下溢！]
-       └─ balances[Attack] = 0 - 1 ⚠️ [第1次更新，下溢！]
+       │          │          └─ balances[Attack] = 3-1 
+       │          └─ balances[Attack] = 2-1 
+       └─ balances[Attack] = 1- 1 
 
 结果：
 ├─ Vault.balance = 0 ETH（被掏空！）
@@ -260,6 +260,7 @@ contract TheDAO {
 - **反对者**：保持原链，不回滚 → **ETC**（Ethereum Classic）
 
 **争议**：
+
 - ✅ **支持者**：保护用户资金，维护信任
 - ❌ **反对者**：违背"代码即法律"，破坏不可篡改性
 
@@ -517,6 +518,8 @@ function withdraw() public {
 
 #### 1. 跨函数重入
 
+这个也是一样的道理，核心原理是因为状态是之后再更新的，导致当我们receive中接收之后就去调用transfer函数，因为没有状态检测。只要是涉及到转账这一方向，就必须要小心重入攻击
+
 ```solidity
 contract Vulnerable is ReentrancyGuard {
     mapping(address => uint256) public balances;
@@ -566,6 +569,10 @@ contract ContractB {
 
 **注意**：ReentrancyGuard 只防止同一个合约内的重入！
 
+方式一：检查-生效-交互。这种形式是最好的
+
+方式二：给所有函数都加上这个锁
+
 ---
 
 ## 5. 实战演练
@@ -597,13 +604,14 @@ contract Bank {
 
 <details>
 <summary>💡 点击查看答案</summary>
-
 **分析**：
+
 - ✅ 使用了 `transfer`（2300 gas 限制）
 - ✅ 有余额检查
 - ⚠️ 没有遵循 CEI 模式（先转账后更新）
 
 **是否安全？**
+
 - 目前相对安全（因为 `transfer` 的 gas 限制）
 - 但不是最佳实践（依赖 gas 假设）
 - 未来可能不安全（如果 gas 成本变化）
@@ -716,6 +724,7 @@ function withdraw(uint256 amount) public {
 ```
 
 **方法 2：ReentrancyGuard**
+
 ```solidity
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 
@@ -734,6 +743,7 @@ contract SafeVault is ReentrancyGuard {
 ```
 
 **方法 3：拉取模式**
+
 ```solidity
 contract SafeVault {
     mapping(address => uint256) public pendingWithdrawals;
@@ -838,5 +848,4 @@ contract SafeVault {
 ---
 
 **Security first! 永远把安全放在第一位！** 🛡️
-
 
