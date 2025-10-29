@@ -1,23 +1,61 @@
-# Node
-node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
+# Hardhat files
+cache
+artifacts
+typechain-types
+
+# Node modules
+node_modules
+**/node_modules
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+**/.env
+
+# Testing
+coverage
+coverage.json
+**/coverage
+**/coverage.json
 
 # IDE
-.vscode/
-.idea/
-*.swp
-*.swo
+.vscode/*
+!.vscode/settings.json.example
+!.vscode/extensions.json
+.idea
+*.iml
 
 # OS
 .DS_Store
 Thumbs.db
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+logs
+*.log.*
+
+# Build
+dist
+build
+out
 
 # Temp
 *.tmp
-*.temp
+.temp
+temp
 
-# Build
-dist/
-build/
+# Obsidian (if used)
+.obsidian/workspace
+.obsidian/workspace.json
+.obsidian/workspace-mobile.json
+
+# Lock files (可选：如果团队协作，可能需要提交)
+# package-lock.json
+# yarn.lock
+
+# Deployment records (可选：根据需求决定)
+# deployments/
