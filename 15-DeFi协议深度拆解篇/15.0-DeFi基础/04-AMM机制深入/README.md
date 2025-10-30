@@ -707,6 +707,61 @@ AMM交易完全透明:
 
 ---
 
+```mermaid
+graph TD
+    subgraph User Wallet
+        A[👤 用户]
+    end
+
+    subgraph Periphery Layer
+        B[🔁 UniswapV2Router02]
+    end
+
+    subgraph Core Layer
+        C[⚖️ DAI/WETH Pair Contract]
+    end
+
+    A -- 1. 调用 swapExactTokensForTokens() --o B
+    B -- 2. 计算并从用户钱包提取 100 DAI --o A
+    B -- 3. 将 100 DAI 发送到 Pair 合约 --o C
+    C -- 4. 更新 DAI 和 WETH 的储备量 (Reserves) --o C
+    C -- 5. 遵循 x * y = k 算法计算应转出的 WETH 数量 --o C
+    C -- 6. 将计算出的 WETH 发送回给 Router 合约 --o B
+    B -- 7. 将收到的 WETH 发送给用户钱包 --o A
+    A -- ✅ 交易完成 --o A
+```
+
+
+
+```mermaid
+graph TD
+    subgraph User Wallet
+        A["👤 用户 (第一个 LP)"]
+    end
+
+    subgraph Periphery Layer
+        B["🔁 UniswapV2Router02"]
+    end
+
+    subgraph Core Layer
+        C["🏭 UniswapV2Factory"]
+        D["⚖️ 新的 MyToken/WETH Pair 合约"]
+    end
+
+    A -- "1. 调用 addLiquidity()" --o B
+    B -- "2. 发现 MyToken/WETH 交易对不存在" --o B
+    B -- "3. 调用 Factory 合约的 createPair()" --o C
+    C -- "4. 部署一个新的 Pair 合约地址" --o D
+    C -- "5. 将新的 Pair 地址记录下来并返回给 Router" --o B
+    B -- "6. (接续 Add Liquidity 流程) 从用户提取 MyToken 和 WETH" --o A
+    B -- "7. 将代币发送到【新创建】的 Pair 合约" --o D
+    D -- "8. 铸造初始的 LP 代币" --o D
+    D -- "9. 将 LP 代币发送给用户" --o A
+    A -- "✅ 交易对创建并添加流动性完成" --o A
+```
+
+
+
 ## 🧮 综合练习
 
 ### 练习1：完整交易模拟
