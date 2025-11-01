@@ -69,109 +69,254 @@ vs 白皮书（Whitepaper）：
 
 ## 2. 系统架构图
 
-### 2.1 完整系统架构
+### 2.1 分层架构总览（简化版）
 
 ```mermaid
-graph TD
-    %% Define Layers using Subgraphs for clarity
-    subgraph "👤 End User / External Actors Layer"
-        direction LR
-        Trader["👨‍💻 交易者 (Trader)"]
-        LP["💰 流动性提供者 (LP)"]
-        Arbitrageur["🤖 套利者 (Arbitrageur)"]
-        OracleConsumer["🏛️ 预言机消费者 (e.g., Aave, Compound)"]
-    end
-
-    subgraph "Layer 1: Uniswap Periphery (User-Facing Interface)"
-        Router["🔁 UniswapV2Router02 <br> (处理路径规划, 安全检查, ETH封装)"]
-    end
-
-    subgraph "Layer 2: Uniswap Core (Immutable Logic & State)"
-        Factory["🏭 UniswapV2Factory <br> (创建并追踪所有交易对)"]
-        
-        subgraph " "
-            direction LR
-            Pair_A_B["⚖️ Pair (Token A / Token B) <br> (State: reserves, priceAccumulator)"]
-            Pair_B_C["⚖️ Pair (Token B / Token C) <br> (State: reserves, priceAccumulator)"]
-        end
-
+graph TB
+    subgraph "用户层"
+        User[👤 用户<br/>交易者/LP/套利者/预言机]
     end
     
-    %% --- Define Interactions ---
-
-    %% 1. Trading Flow (A -> C Multi-hop Swap)
-    Trader -- "1. swapExactTokensForTokens(A -> C)" --o Router
-    Router -- "2a. swap(A for B)" --> Pair_A_B
-    Pair_A_B -- "2b. transfer(Token B)" --> Router
-    Router -- "2c. swap(B for C)" --> Pair_B_C
-    Pair_B_C -- "2d. transfer(Token C)" --> Router
-    Router -- "2e. transfer(Token C)" --> Trader
-
-    %% 2. Add Liquidity Flow
-    LP -- "3. addLiquidity(A, B)" --o Router
-    Router -- "4. getPair(A, B)" --> Factory
-    Factory -- "5. returns Pair address" --> Router
-    Router -- "6. transfer(A, B)" --> Pair_A_B
-    Pair_A_B -- "7. mint() LP Tokens" --> LP
-
-    %% 3. Create Pair Flow (A special case of Add Liquidity)
-    LP -- "3a. addLiquidity for a new pair" --o Router
-    Router -- "4a. getPair() finds nothing" --> Factory
-    Factory -- "5a. createPair(A, B)" --o Pair_A_B
-    Factory -- "5b. returns NEW Pair address" --> Router
-    %% The flow then continues from step 6
-
-    %% 4. Oracle Reading Flow
-    Pair_A_B -- "On every swap: <br> update internal price accumulator" --o Pair_A_B
-    OracleConsumer -- "8. Periodically read cumulative price <br> to calculate Time-Weighted Average Price (TWAP)" --> Pair_A_B
-
-    %% 5. Arbitrage Flow
-    Arbitrageur -- "9a. Read reserves/price" --> Pair_A_B
-    Arbitrageur -- "9b. Compare with CEX/other DEX price" --o External["🌐 CEX / Other Markets"]
-    Arbitrageur -- "9c. If price differs, execute profitable swap" --o Router
+    subgraph "Periphery层 - 可升级"
+        Router[🔁 Router<br/>用户接口层]
+        Library[📚 Library<br/>工具函数]
+    end
     
-    %% Style links for better readability (CORRECTED)
-    linkStyle 0,4,8,13 stroke-width:2px,fill:none,stroke:green
-    linkStyle 1,2,3,5,6 stroke-width:1.5px,fill:none,stroke:#333
-    linkStyle 9,10,11 stroke-width:1.5px,fill:none,stroke:blue
-    linkStyle 7 stroke-width:2px,fill:none,stroke:orange
-    linkStyle 12 stroke-width:2px,fill:none,stroke:purple
+    subgraph "Core层 - 不可变"
+        Factory[🏭 Factory<br/>创建&管理]
+        Pair[⚖️ Pair<br/>核心逻辑&状态]
+    end
+    
+    subgraph "代币层"
+        Token[🪙 ERC20代币]
+    end
+    
+    User --> Router
+    Router --> Library
+    Router --> Factory
+    Router --> Pair
+    Factory -.创建.-> Pair
+    Pair <--> Token
+    
+    style Router fill:#51cf66
+    style Library fill:#51cf66
+    style Factory fill:#339af0
+    style Pair fill:#339af0
 ```
 
-### 2.2 架构说明
+**核心理念：**
+- 🔐 Core层：不可变，资金安全
+- 🔄 Periphery层：可升级，功能灵活
+- 🎯 分层解耦：职责清晰，易于扩展
 
-**Layer 0 - 用户层：**
+---
+
+### 2.2 Core层架构（核心不可变层）
+
+```mermaid
+graph LR
+    subgraph "UniswapV2Factory"
+        F1[createPair]
+        F2[getPair映射]
+        F3[协议费管理]
+    end
+    
+    subgraph "UniswapV2Pair #1"
+        P1[状态存储<br/>reserves<br/>累积价格]
+        P2[核心函数<br/>swap<br/>mint<br/>burn]
+    end
+    
+    subgraph "UniswapV2Pair #2"
+        P3[状态存储]
+        P4[核心函数]
+    end
+    
+    subgraph "UniswapV2ERC20"
+        E1[LP代币标准]
+        E2[EIP-2612<br/>permit签名]
+    end
+    
+    F1 -.创建.-> P1
+    F1 -.创建.-> P3
+    F2 -.查询.-> P1
+    F2 -.查询.-> P3
+    
+    P1 --> E1
+    P3 --> E1
+    
+    style F1 fill:#339af0
+    style P1 fill:#4dabf7
+    style P3 fill:#4dabf7
+    style E1 fill:#74c0fc
 ```
-4类用户角色：
-1. 交易者：兑换代币
-2. LP：提供流动性赚手续费
-3. 套利者：平衡价格
-4. 预言机消费者：使用价格数据
+
+**核心合约职责：**
+
+| 合约 | 职责 | 特点 |
+|------|------|------|
+| **Factory** | 创建和注册Pair | 统一管理，create2部署 |
+| **Pair** | 状态存储+核心逻辑 | x·y=k，TWAP，Flash Swaps |
+| **ERC20** | LP代币功能 | 标准+permit签名授权 |
+
+---
+
+### 2.3 Periphery层架构（可升级接口层）
+
+```mermaid
+graph TB
+    subgraph "UniswapV2Router02"
+        R1[Swap函数组<br/>支持ETH/Token<br/>支持多跳]
+        R2[流动性函数组<br/>add/remove<br/>支持permit]
+        R3[安全检查<br/>滑点保护<br/>截止时间]
+    end
+    
+    subgraph "UniswapV2Library"
+        L1[离线计算<br/>pairFor<br/>sortTokens]
+        L2[数量计算<br/>getAmountOut<br/>getAmountIn]
+        L3[路径计算<br/>getAmountsOut<br/>getAmountsIn]
+    end
+    
+    R1 --> L2
+    R1 --> L3
+    R2 --> L1
+    R2 --> L2
+    
+    style R1 fill:#51cf66
+    style R2 fill:#51cf66
+    style R3 fill:#51cf66
+    style L1 fill:#69db7c
+    style L2 fill:#69db7c
+    style L3 fill:#69db7c
 ```
 
-**Layer 1 - Periphery层：**
+**Periphery优势：**
+- ✅ 用户友好（处理ETH、多跳、滑点）
+- ✅ 可以升级（修复bug、添加功能）
+- ✅ 无资金风险（不持有用户资金）
+
+---
+
+### 2.4 典型交互流程
+
+#### 流程1：Swap交易（单跳）
+
+```mermaid
+sequenceDiagram
+    participant User as 👤 用户
+    participant Router as 🔁 Router
+    participant Pair as ⚖️ Pair
+    participant Token as 🪙 Token
+    
+    User->>Router: 1. swapExactTokensForTokens<br/>(100 USDC → ETH)
+    Router->>Router: 2. 计算输出量<br/>(~0.05 ETH)
+    Router->>Router: 3. 检查滑点<br/>(>= minOut ✓)
+    Router->>Token: 4. transferFrom<br/>(User → Pair, 100 USDC)
+    Router->>Pair: 5. swap(0, 0.05 ETH, User)
+    Pair->>Pair: 6. 验证余额
+    Pair->>Pair: 7. 验证 x·y≥k ✓
+    Pair->>Pair: 8. 更新reserves
+    Pair->>Pair: 9. 更新TWAP
+    Pair->>Token: 10. transfer(0.05 ETH → User)
+    Pair-->>Router: 11. Swap成功
+    Router-->>User: 12. 收到0.05 ETH ✅
 ```
-Router合约：
-- 用户友好的接口
-- 路径计算和优化
-- 安全检查（滑点、截止时间）
-- ETH包装/解包
 
-特点：可升级，可替换
+#### 流程2：添加流动性
+
+```mermaid
+sequenceDiagram
+    participant User as 💰 LP
+    participant Router as 🔁 Router
+    participant Factory as 🏭 Factory
+    participant Pair as ⚖️ Pair
+    
+    User->>Router: 1. addLiquidity<br/>(100 USDC + 0.05 ETH)
+    Router->>Factory: 2. getPair(USDC, ETH)
+    
+    alt Pair存在
+        Factory-->>Router: 3a. 返回Pair地址
+    else Pair不存在
+        Factory->>Pair: 3b. createPair() 创建
+        Factory-->>Router: 3c. 返回新Pair地址
+    end
+    
+    Router->>Pair: 4. 转入100 USDC
+    Router->>Pair: 5. 转入0.05 ETH
+    Router->>Pair: 6. mint(User)
+    Pair->>Pair: 7. 计算LP代币<br/>L = √(100×0.05)
+    Pair->>User: 8. 铸造L个LP代币
+    Pair-->>Router: 9. 返回流动性
+    Router-->>User: 10. 添加成功 ✅
 ```
 
-**Layer 2 - Core层：**
+#### 流程3：Flash Swap闪电兑换
+
+```mermaid
+sequenceDiagram
+    participant User as 👤 用户
+    participant Pair as ⚖️ Pair
+    participant Callback as 📞 回调合约
+    participant External as 🌐 外部协议
+    
+    User->>Pair: 1. swap(0.05 ETH, User, data)
+    Pair->>User: 2. 先转0.05 ETH ⚡
+    Note over Pair,User: 还没收到付款！
+    Pair->>Callback: 3. uniswapV2Call()
+    Callback->>External: 4. 用0.05 ETH套利
+    External-->>Callback: 5. 获得110 USDC
+    Callback->>Pair: 6. 还款<br/>100 USDC + 0.3% fee
+    Pair->>Pair: 7. 验证余额
+    Pair->>Pair: 8. 验证 x·y≥k ✓
+    Pair-->>User: 9. Flash Swap成功 ✅
+    Note over Pair: 整个过程在1个交易内
 ```
-Factory合约：
-- 创建Pair
-- 管理Pair注册表
 
-Pair合约：
-- 存储储备量
-- 实现swap/mint/burn
-- 维护TWAP数据
+---
 
-特点：不可变，极简，安全
+### 2.5 架构设计亮点
+
+**亮点1：分层架构的优势**
+
+```
+Core层（不可变）：
+✅ 资金绝对安全
+✅ 逻辑永不改变
+✅ 审计一次永久有效
+
+Periphery层（可升级）：
+✅ 可以修复bug
+✅ 可以添加功能
+✅ 可以优化体验
+
+两全其美！⭐⭐⭐⭐⭐
+```
+
+**亮点2：Factory模式的价值**
+
+```
+统一创建：
+✅ 所有Pair由Factory创建
+✅ 防止重复创建
+✅ 便于发现和查询
+
+create2确定性：
+✅ 地址可离线计算
+✅ 无需链上查询
+✅ 节省Gas
+```
+
+**亮点3：Library的妙用**
+
+```
+代码复用：
+✅ 多个合约共享逻辑
+✅ 减少部署成本
+✅ 便于升级（部署新Router）
+
+离线计算：
+✅ pairFor不需要链上查询
+✅ getAmountOut可以预估
+✅ 降低RPC调用
 ```
 
 ---

@@ -584,6 +584,7 @@ DeFi协议需要价格的场景：
 ### 5.2 TWAP设计
 
 **白皮书原文：**
+
 > Uniswap v2 introduces a new price oracle mechanism that is resistant to manipulation via time-weighted average prices (TWAP).
 
 **核心思想：**
