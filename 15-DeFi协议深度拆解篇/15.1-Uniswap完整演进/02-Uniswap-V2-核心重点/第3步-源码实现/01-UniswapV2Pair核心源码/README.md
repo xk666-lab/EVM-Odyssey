@@ -113,18 +113,112 @@ function sqrt(uint y) returns (uint z) {
 }
 ```
 
-**UQ112x112库：**
+**UQ112x112库：二进制定点数（Binary Fixed Point Number）**
+
+这个库实现了 **`UQ112.112`** 定点数格式，用于TWAP价格累积计算。
+
+**什么是UQ112.112？**
+
+```
+Q = Q number format（定点数格式）
+U = Unsigned（无符号，只支持正数）
+112.112 = 用uint224存储，前112位存整数部分，后112位存小数部分
+
+格式：|← 112 bits 整数 →|← 112 bits 小数 →|
+      |__________________|__________________|
+                  uint224 (224 bits)
+```
+
+**核心常数：Q112**
+
 ```solidity
-// 定点数编码（用于TWAP）
-uint224 = uint112 整数部分 + uint112 小数部分
+uint224 constant Q112 = 2**112;  // 缩放因子
+```
 
-encode(uint112 y) returns (uint224 z) {
-    z = uint224(y) * Q112;  // Q112 = 2^112
+所有数字都会乘以 2^112 来存储：
+- **1.0** 存储为：`1 × 2^112`
+- **2.0** 存储为：`2 × 2^112`
+- **0.5** 存储为：`0.5 × 2^112 = 2^111`
+- **5.0** 存储为：`5 × 2^112`
+
+**函数1：encode() - 整数编码为定点数**
+
+```solidity
+function encode(uint112 y) internal pure returns (uint224 z) {
+    z = uint224(y) * Q112;  // never overflows
 }
+```
 
-uqdiv(uint224 x, uint112 y) returns (uint224 z) {
+作用：将整数转换为UQ112.112格式
+
+例子：
+```
+输入：y = 5
+计算：z = 5 × 2^112
+结果：z 代表定点数 5.0
+```
+
+为什么永远不溢出？
+```
+最大输入：uint112最大值 = 2^112 - 1
+最大结果：(2^112 - 1) × 2^112 = 2^224 - 2^112
+uint224最大值：2^224 - 1
+
+因为 (2^224 - 2^112) < (2^224 - 1)
+所以永远不会溢出 ✅
+```
+
+**函数2：uqdiv() - 定点数除法**
+
+```solidity
+function uqdiv(uint224 x, uint112 y) internal pure returns (uint224 z) {
     z = x / uint224(y);
 }
+```
+
+作用：用定点数除以整数，结果仍是定点数
+
+例子：
+```
+计算：10.0 ÷ 4 = ?
+
+输入 x：10.0 在UQ112.112中 = 10 × 2^112
+输入 y：4（整数）
+
+计算：z = (10 × 2^112) / 4 = 2.5 × 2^112
+
+结果：z 代表定点数 2.5 ✅
+```
+
+**在TWAP中的应用：**
+
+```solidity
+// 计算价格（reserve1 / reserve0）并编码
+price0Cumulative += UQ112x112.encode(reserve1).uqdiv(reserve0) × timeElapsed;
+
+步骤拆解：
+1. encode(reserve1)     → reserve1 × 2^112
+2. uqdiv(reserve0)      → (reserve1 × 2^112) / reserve0
+                        = price × 2^112  (定点数格式的价格)
+3. × timeElapsed        → 累积价格增量
+```
+
+**为什么使用定点数？**
+
+```
+问题：Solidity不支持浮点数
+例如：价格 = 2000.5678 USDC/ETH
+
+传统方案A：只存整数 = 2000 ❌ 精度损失
+传统方案B：乘以10^18 ✅ 但是会溢出
+
+UQ112.112方案：
+✅ 高精度：112位小数 ≈ 77位十进制小数
+✅ 足够大：112位整数可以存任何代币数量
+✅ 不溢出：精心设计的位数分配
+✅ 高效：只用整数运算，Gas便宜
+
+完美方案！⭐⭐⭐⭐⭐
 ```
 
 ---
