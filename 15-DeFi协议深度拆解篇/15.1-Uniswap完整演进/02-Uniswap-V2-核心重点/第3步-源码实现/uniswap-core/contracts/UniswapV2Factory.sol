@@ -6,8 +6,6 @@ import './interfaces/IUniswapV2Factory.sol';
 import './UniswapV2Pair.sol';
 import "./interfaces/IUniswapV2Pair.sol";
 contract UniswapV2Factory is IUniswapV2Factory{
-
-
  address public feeTo;
     address public feeToSetter;
 
@@ -39,9 +37,11 @@ require(getPair(token0,token1)==0, "PAIR_EXISTS");
 bytes memory bytecode=type(UniswapV2Pair).creationCode;
 bytes32 salt=keccak256(abi.encodePacked(token0,token1));
 
- assembly {
-            pair := create2(0, add(bytecode, 32), mload(bytecode), salt)
-        }
+
+
+// 2. 部署合约 (这就是新方式！)
+// 不再需要汇编，不再需要手动处理 bytecode
+address pair = address(new UniswapV2Pair{salt: salt}());
 IUniswapV2Pair(pair).initialize(token0,token1);
 
 getPair[token0][token1]=pair;
@@ -49,7 +49,7 @@ getPair[token1][token0]=pair;
 
 allPairs.push(pair);
 
-emit PairCreated(token0, token1, apair, null);
+emit PairCreated(token0, token1, pair,all);
 
 }
 
