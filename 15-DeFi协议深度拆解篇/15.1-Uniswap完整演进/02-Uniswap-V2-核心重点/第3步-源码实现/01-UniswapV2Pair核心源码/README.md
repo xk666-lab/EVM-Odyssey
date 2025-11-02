@@ -1330,6 +1330,564 @@ contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
 
 ---
 
+## 10. UniswapV2ERC20 深度解析
+
+### 10.1 为什么需要自定义ERC20？
+
+```
+Uniswap V2的LP代币不是普通的ERC20，而是：
+
+特殊需求：
+1. ✅ 标准ERC20功能（transfer, approve等）
+2. ✅ EIP-2612 permit（链下签名授权）⭐
+3. ✅ 极致Gas优化
+4. ✅ 域分隔符（Domain Separator）防重放
+
+为什么不用OpenZeppelin？
+- V2追求极致优化
+- 减少外部依赖
+- 精简到只需要的功能
+- 每个字节都精打细算
+```
+
+### 10.2 完整合约源码
+
+```solidity
+// SPDX-License-Identifier: MIT
+pragma solidity =0.5.16;
+
+import './interfaces/IUniswapV2ERC20.sol';
+import './libraries/SafeMath.sol';
+
+/**
+ * @title UniswapV2ERC20
+ * @notice Uniswap V2的LP代币实现
+ * @dev 实现标准ERC20 + EIP-2612 permit
+ */
+contract UniswapV2ERC20 is IUniswapV2ERC20 {
+    using SafeMath for uint;
+
+    // ==================== ERC20基础信息 ====================
+    
+    string public constant name = 'Uniswap V2';
+    string public constant symbol = 'UNI-V2';
+    uint8 public constant decimals = 18;
+    
+    // ==================== ERC20状态变量 ====================
+    
+    uint  public totalSupply;
+    mapping(address => uint) public balanceOf;
+    mapping(address => mapping(address => uint)) public allowance;
+    
+    // ==================== EIP-2612状态变量 ====================
+    
+    bytes32 public DOMAIN_SEPARATOR;
+    // keccak256("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)");
+    bytes32 public constant PERMIT_TYPEHASH = 0x6e71edae12b1b97f4d1f60370fef10105fa2faae0126114a169c64845d6126c9;
+    mapping(address => uint) public nonces;
+
+    // ==================== 事件 ====================
+    
+    event Approval(address indexed owner, address indexed spender, uint value);
+    event Transfer(address indexed from, address indexed to, uint value);
+
+    // ==================== 构造函数 ====================
+    
+    constructor() public {
+        uint chainId;
+        assembly {
+            chainId := chainid
+        }
+        DOMAIN_SEPARATOR = keccak256(
+            abi.encode(
+                keccak256('EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)'),
+                keccak256(bytes(name)),
+                keccak256(bytes('1')),
+                chainId,
+                address(this)
+            )
+        );
+    }
+
+    // ==================== 内部函数 ====================
+
+    function _mint(address to, uint value) internal {
+        totalSupply = totalSupply.add(value);
+        balanceOf[to] = balanceOf[to].add(value);
+        emit Transfer(address(0), to, value);
+    }
+
+    function _burn(address from, uint value) internal {
+        balanceOf[from] = balanceOf[from].sub(value);
+        totalSupply = totalSupply.sub(value);
+        emit Transfer(from, address(0), value);
+    }
+
+    function _approve(address owner, address spender, uint value) private {
+        allowance[owner][spender] = value;
+        emit Approval(owner, spender, value);
+    }
+
+    function _transfer(address from, address to, uint value) private {
+        balanceOf[from] = balanceOf[from].sub(value);
+        balanceOf[to] = balanceOf[to].add(value);
+        emit Transfer(from, to, value);
+    }
+
+    // ==================== ERC20标准函数 ====================
+
+    function approve(address spender, uint value) external returns (bool) {
+        _approve(msg.sender, spender, value);
+        return true;
+    }
+
+    function transfer(address to, uint value) external returns (bool) {
+        _transfer(msg.sender, to, value);
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint value) external returns (bool) {
+        if (allowance[from][msg.sender] != uint(-1)) {
+            allowance[from][msg.sender] = allowance[from][msg.sender].sub(value);
+        }
+        _transfer(from, to, value);
+        return true;
+    }
+
+    // ==================== EIP-2612 permit函数 ====================
+
+    function permit(
+        address owner, 
+        address spender, 
+        uint value, 
+        uint deadline, 
+        uint8 v, 
+        bytes32 r, 
+        bytes32 s
+    ) external {
+        require(deadline >= block.timestamp, 'UniswapV2: EXPIRED');
+        bytes32 digest = keccak256(
+            abi.encodePacked(
+                '\x19\x01',
+                DOMAIN_SEPARATOR,
+                keccak256(abi.encode(PERMIT_TYPEHASH, owner, spender, value, nonces[owner]++, deadline))
+            )
+        );
+        address recoveredAddress = ecrecover(digest, v, r, s);
+        require(recoveredAddress != address(0) && recoveredAddress == owner, 'UniswapV2: INVALID_SIGNATURE');
+        _approve(owner, spender, value);
+    }
+}
+```
+
+### 10.3 EIP-2612 Permit 深度解析
+
+**什么是EIP-2612？**
+
+```
+传统ERC20授权流程（2笔交易）：
+1. 用户调用 token.approve(spender, amount)  💰 Gas费
+2. spender调用 token.transferFrom(user, to, amount)  💰 Gas费
+
+问题：
+❌ 用户要支付2次Gas
+❌ 用户体验差
+❌ 新用户门槛高
+
+EIP-2612解决方案（1笔交易）：
+1. 用户在链下签名授权消息  ✅ 免费！
+2. spender调用 permit(签名) + transferFrom  💰 只需1次Gas
+
+优势：
+✅ 用户省Gas（只需签名，不需要链上交易）
+✅ 更好的UX（一步完成）
+✅ 支持元交易（meta-transaction）
+```
+
+**permit函数详解：**
+
+```solidity
+function permit(
+    address owner,      // 代币所有者（签名者）
+    address spender,    // 被授权者
+    uint value,         // 授权额度
+    uint deadline,      // 截止时间
+    uint8 v,           // 签名参数v
+    bytes32 r,         // 签名参数r
+    bytes32 s          // 签名参数s
+) external {
+    // 步骤1：检查截止时间
+    require(deadline >= block.timestamp, 'UniswapV2: EXPIRED');
+    
+    // 步骤2：构造EIP-712消息摘要
+    bytes32 digest = keccak256(
+        abi.encodePacked(
+            '\x19\x01',                    // EIP-191前缀
+            DOMAIN_SEPARATOR,              // 域分隔符
+            keccak256(abi.encode(
+                PERMIT_TYPEHASH,           // permit类型哈希
+                owner,                     // 所有者
+                spender,                   // 被授权者
+                value,                     // 额度
+                nonces[owner]++,          // nonce（防重放）
+                deadline                   // 截止时间
+            ))
+        )
+    );
+    
+    // 步骤3：恢复签名者地址
+    address recoveredAddress = ecrecover(digest, v, r, s);
+    
+    // 步骤4：验证签名
+    require(
+        recoveredAddress != address(0) && recoveredAddress == owner, 
+        'UniswapV2: INVALID_SIGNATURE'
+    );
+    
+    // 步骤5：执行授权
+    _approve(owner, spender, value);
+}
+```
+
+### 10.4 EIP-712 域分隔符（Domain Separator）
+
+**什么是Domain Separator？**
+
+```
+作用：防止签名在不同场景下被重放
+
+包含信息：
+1. 合约名称（name）
+2. 版本（version）
+3. 链ID（chainId）
+4. 合约地址（verifyingContract）
+
+为什么需要？
+假设没有域分隔符：
+- 攻击者可以在Uniswap V2复制签名到Uniswap V3 ❌
+- 攻击者可以在以太坊主网复制签名到测试网 ❌
+- 攻击者可以在不同Pair间复制签名 ❌
+
+有了域分隔符：
+- 签名绑定到特定合约 ✅
+- 签名绑定到特定链 ✅
+- 签名不可跨合约使用 ✅
+```
+
+**构造Domain Separator：**
+
+```solidity
+constructor() public {
+    // 获取当前链ID
+    uint chainId;
+    assembly {
+        chainId := chainid()  // 使用assembly获取链ID
+    }
+    
+    // 计算域分隔符
+    DOMAIN_SEPARATOR = keccak256(
+        abi.encode(
+            // EIP712Domain类型哈希
+            keccak256('EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)'),
+            keccak256(bytes(name)),        // 'Uniswap V2'
+            keccak256(bytes('1')),         // 版本 '1'
+            chainId,                       // 链ID（1=主网, 5=Goerli等）
+            address(this)                  // 当前合约地址
+        )
+    );
+}
+
+例子：
+主网Pair A: DOMAIN_SEPARATOR_A = hash(name, version, 1, 0xAAA...)
+主网Pair B: DOMAIN_SEPARATOR_B = hash(name, version, 1, 0xBBB...)
+测试网Pair: DOMAIN_SEPARATOR_TEST = hash(name, version, 5, 0xAAA...)
+
+全都不同！✅ 签名无法跨合约使用
+```
+
+### 10.5 Nonce防重放攻击
+
+**什么是Nonce？**
+
+```
+Nonce = Number used once（只使用一次的数字）
+
+作用：防止签名被重复使用
+
+例子：
+用户签名授权：
+- owner: Alice
+- spender: Bob  
+- value: 100 LP
+- nonce: 0  ← 第一次授权
+- deadline: 未来时间
+
+没有nonce的问题：
+1. Bob使用签名调用permit  ✅
+2. Alice撤销授权（allowance = 0）
+3. Bob再次使用相同签名调用permit  ❌ 又授权了！
+
+有nonce的解决：
+1. Bob使用签名调用permit（nonce: 0）✅
+2. nonce自增为1
+3. Bob再次使用相同签名（nonce: 0）❌ 签名无效！
+
+每次permit后nonce++，旧签名失效！
+```
+
+**Nonce实现：**
+
+```solidity
+mapping(address => uint) public nonces;
+
+// 在permit中使用
+nonces[owner]++  // 先使用，后自增
+
+// 用户签名时需要包含当前nonce
+// 下次签名需要用新的nonce
+```
+
+### 10.6 EIP-712签名格式
+
+**EIP-712结构化签名：**
+
+```
+传统签名（eth_sign）：
+签名内容 = hash(任意消息)
+问题：用户不知道签了什么 ⚠️
+
+EIP-712签名：
+签名内容 = hash(结构化、人类可读的消息)
+优势：钱包可以显示清晰的内容 ✅
+
+签名消息结构：
+{
+  domain: {
+    name: "Uniswap V2",
+    version: "1",
+    chainId: 1,
+    verifyingContract: "0x..."
+  },
+  types: {
+    Permit: [
+      { name: "owner", type: "address" },
+      { name: "spender", type: "address" },
+      { name: "value", type: "uint256" },
+      { name: "nonce", type: "uint256" },
+      { name: "deadline", type: "uint256" }
+    ]
+  },
+  primaryType: "Permit",
+  message: {
+    owner: "0xAlice...",
+    spender: "0xBob...",
+    value: "100000000000000000000",
+    nonce: "0",
+    deadline: "1234567890"
+  }
+}
+
+用户在钱包看到：
+✅ 授权 Uniswap V2
+✅ 授权给: 0xBob...
+✅ 授权额度: 100 LP
+✅ 截止时间: 2024-01-01
+✅ Nonce: 0
+
+清晰明了！
+```
+
+### 10.7 完整使用流程
+
+**场景：用户移除流动性（使用permit）**
+
+```javascript
+// ===== 步骤1：用户构造permit签名 =====
+const domain = {
+  name: 'Uniswap V2',
+  version: '1',
+  chainId: 1,
+  verifyingContract: pairAddress
+};
+
+const types = {
+  Permit: [
+    { name: 'owner', type: 'address' },
+    { name: 'spender', type: 'address' },
+    { name: 'value', type: 'uint256' },
+    { name: 'nonce', type: 'uint256' },
+    { name: 'deadline', type: 'uint256' }
+  ]
+};
+
+const value = {
+  owner: userAddress,
+  spender: routerAddress,
+  value: lpAmount.toString(),
+  nonce: await pair.nonces(userAddress),
+  deadline: Math.floor(Date.now() / 1000) + 3600  // 1小时后过期
+};
+
+// 用户签名（钱包弹窗，免费）
+const signature = await signer._signTypedData(domain, types, value);
+const { v, r, s } = ethers.utils.splitSignature(signature);
+
+// ===== 步骤2：调用removeLiquidityWithPermit（1笔交易）=====
+await router.removeLiquidityWithPermit(
+  tokenA,
+  tokenB,
+  lpAmount,
+  amountAMin,
+  amountBMin,
+  userAddress,
+  deadline,
+  false,  // approveMax
+  v, r, s  // 签名参数
+);
+
+// Router内部会先调用permit，再调用removeLiquidity
+// 用户只支付1次Gas！✅
+```
+
+### 10.8 安全性分析
+
+**为什么安全？**
+
+```
+1. 域分隔符绑定
+   ✅ 签名只在特定合约有效
+   ✅ 不能跨链使用
+   ✅ 不能跨Pair使用
+
+2. Nonce防重放
+   ✅ 每个签名只能用一次
+   ✅ 旧签名自动失效
+
+3. 截止时间
+   ✅ 过期签名无效
+   ✅ 限制攻击窗口
+
+4. 签名验证
+   ✅ ecrecover恢复签名者
+   ✅ 验证签名者=owner
+
+5. EIP-712结构化
+   ✅ 用户看得懂签名内容
+   ✅ 防止钓鱼攻击
+```
+
+**潜在风险：**
+
+```
+⚠️ 风险1：永久授权
+如果value = uint(-1)（最大值）
+等于永久授权！
+建议：只授权需要的额度
+
+⚠️ 风险2：deadline设置太长
+如果deadline = 很远的未来
+签名长期有效
+建议：合理设置截止时间（如1小时）
+
+⚠️ 风险3：签名泄露
+如果签名泄露给恶意第三方
+在deadline前可以被使用
+建议：不要分享签名数据
+```
+
+### 10.9 与标准ERC20的对比
+
+| 特性 | 标准ERC20 | UniswapV2ERC20 |
+|------|-----------|----------------|
+| **transfer** | ✅ | ✅ |
+| **approve** | ✅ | ✅ |
+| **transferFrom** | ✅ | ✅ 优化版 |
+| **permit** | ❌ | ✅ EIP-2612 |
+| **Domain Separator** | ❌ | ✅ 防重放 |
+| **Nonce** | ❌ | ✅ 防重放 |
+| **链下签名授权** | ❌ | ✅ 省Gas |
+| **元交易支持** | ❌ | ✅ |
+| **优化程度** | 一般 | 极致优化 |
+
+**transferFrom优化：**
+
+```solidity
+// 标准ERC20
+function transferFrom(address from, address to, uint value) external returns (bool) {
+    allowance[from][msg.sender] = allowance[from][msg.sender].sub(value);
+    _transfer(from, to, value);
+    return true;
+}
+
+// V2优化（支持无限授权）
+function transferFrom(address from, address to, uint value) external returns (bool) {
+    if (allowance[from][msg.sender] != uint(-1)) {  // 如果不是最大值
+        allowance[from][msg.sender] = allowance[from][msg.sender].sub(value);
+    }
+    // 如果是uint(-1)，不减少allowance，永久授权！
+    _transfer(from, to, value);
+    return true;
+}
+
+优势：
+✅ 永久授权只需approve一次
+✅ 后续transferFrom不消耗Gas更新allowance
+✅ 常用于Router等可信合约
+```
+
+### 10.10 实战：如何使用permit
+
+**前端集成示例：**
+
+```javascript
+// 1. 获取Pair合约
+const pair = new ethers.Contract(pairAddress, pairABI, provider);
+
+// 2. 准备签名数据
+const owner = await signer.getAddress();
+const spender = routerAddress;
+const value = ethers.utils.parseEther("100");  // 100 LP
+const nonce = await pair.nonces(owner);
+const deadline = Math.floor(Date.now() / 1000) + 1800;  // 30分钟
+
+// 3. 构造EIP-712消息
+const domain = {
+  name: await pair.name(),
+  version: '1',
+  chainId: (await provider.getNetwork()).chainId,
+  verifyingContract: pairAddress
+};
+
+const types = {
+  Permit: [
+    { name: 'owner', type: 'address' },
+    { name: 'spender', type: 'address' },
+    { name: 'value', type: 'uint256' },
+    { name: 'nonce', type: 'uint256' },
+    { name: 'deadline', type: 'uint256' }
+  ]
+};
+
+const message = {
+  owner,
+  spender,
+  value: value.toString(),
+  nonce: nonce.toString(),
+  deadline
+};
+
+// 4. 请求用户签名
+const signature = await signer._signTypedData(domain, types, message);
+const sig = ethers.utils.splitSignature(signature);
+
+// 5. 调用permit（链上）
+await pair.permit(owner, spender, value, deadline, sig.v, sig.r, sig.s);
+
+console.log("✅ 授权成功，无需approve交易！");
+```
+
+---
+
 ## ✅ 学习检查清单
 
 ### Level 1：基础理解
