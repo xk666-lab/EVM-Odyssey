@@ -1422,20 +1422,671 @@ graph LR
 
 ---
 
-**🔥 这只是开始！接下来的章节将深入每个函数的源码、安全机制、优化技巧...**
+## 11. addLiquidity核心实现
 
-**准备好了吗？让我们继续深入！** 💪🚀
+### 11.1 addLiquidity完整源码
+
+```solidity
+function addLiquidity(
+    address tokenA,
+    address tokenB,
+    uint amountADesired,      // 期望添加的tokenA数量
+    uint amountBDesired,      // 期望添加的tokenB数量
+    uint amountAMin,          // 最少添加的tokenA（滑点保护）
+    uint amountBMin,          // 最少添加的tokenB（滑点保护）
+    address to,               // LP代币接收地址
+    uint deadline             // 截止时间
+) external 
+  ensure(deadline) 
+  returns (uint amountA, uint amountB, uint liquidity) 
+{
+    // ===== 步骤1：计算实际添加的数量 =====
+    (amountA, amountB) = _addLiquidity(
+        tokenA,
+        tokenB,
+        amountADesired,
+        amountBDesired,
+        amountAMin,
+        amountBMin
+    );
+    
+    // ===== 步骤2：获取或创建Pair =====
+    address pair = UniswapV2Library.pairFor(factory, tokenA, tokenB);
+    
+    // ===== 步骤3：转入代币到Pair =====
+    TransferHelper.safeTransferFrom(tokenA, msg.sender, pair, amountA);
+    TransferHelper.safeTransferFrom(tokenB, msg.sender, pair, amountB);
+    
+    // ===== 步骤4：铸造LP代币 =====
+    liquidity = IUniswapV2Pair(pair).mint(to);
+}
+```
+
+### 11.2 _addLiquidity核心逻辑
+
+```solidity
+function _addLiquidity(
+    address tokenA,
+    address tokenB,
+    uint amountADesired,
+    uint amountBDesired,
+    uint amountAMin,
+    uint amountBMin
+) internal virtual returns (uint amountA, uint amountB) {
+    // ===== 如果Pair不存在，创建它 =====
+    if (IUniswapV2Factory(factory).getPair(tokenA, tokenB) == address(0)) {
+        IUniswapV2Factory(factory).createPair(tokenA, tokenB);
+    }
+    
+    // ===== 获取当前储备量 =====
+    (uint reserveA, uint reserveB) = UniswapV2Library.getReserves(factory, tokenA, tokenB);
+    
+    // ===== 如果是首次添加流动性 =====
+    if (reserveA == 0 && reserveB == 0) {
+        (amountA, amountB) = (amountADesired, amountBDesired);
+    } else {
+        // ===== 后续添加：按比例计算 =====
+        uint amountBOptimal = UniswapV2Library.quote(amountADesired, reserveA, reserveB);
+        
+        if (amountBOptimal <= amountBDesired) {
+            // B足够
+            require(amountBOptimal >= amountBMin, 'INSUFFICIENT_B_AMOUNT');
+            (amountA, amountB) = (amountADesired, amountBOptimal);
+        } else {
+            // B不够，调整A
+            uint amountAOptimal = UniswapV2Library.quote(amountBDesired, reserveB, reserveA);
+            assert(amountAOptimal <= amountADesired);
+            require(amountAOptimal >= amountAMin, 'INSUFFICIENT_A_AMOUNT');
+            (amountA, amountB) = (amountAOptimal, amountBDesired);
+        }
+    }
+}
+```
+
+**添加流动性决策树：**
+
+```mermaid
+flowchart TD
+    Start[addLiquidity调用]
+    
+    Q1{Pair是否存在？}
+    Q1 -->|否| Create[创建新Pair<br/>Factory.createPair]
+    Q1 -->|是| GetReserves
+    Create --> GetReserves
+    
+    GetReserves[获取储备量]
+    
+    Q2{是否首次添加？<br/>reserves == 0?}
+    Q2 -->|是| FirstAdd[使用期望值<br/>amountA = amountADesired<br/>amountB = amountBDesired]
+    Q2 -->|否| CalcOptimal
+    
+    CalcOptimal[计算最优amountB<br/>amountBOptimal = quote<br/>amountADesired, reserveA, reserveB]
+    
+    Q3{amountBOptimal <= amountBDesired?}
+    Q3 -->|是| CheckBMin{amountBOptimal >= amountBMin?}
+    Q3 -->|否| CalcAOptimal
+    
+    CheckBMin -->|是| UseA[使用amountADesired<br/>和 amountBOptimal]
+    CheckBMin -->|否| RevertB[❌ Revert<br/>INSUFFICIENT_B_AMOUNT]
+    
+    CalcAOptimal[计算最优amountA<br/>amountAOptimal = quote<br/>amountBDesired, reserveB, reserveA]
+    
+    Q4{amountAOptimal >= amountAMin?}
+    Q4 -->|是| UseB[使用amountBDesired<br/>和 amountAOptimal]
+    Q4 -->|否| RevertA[❌ Revert<br/>INSUFFICIENT_A_AMOUNT]
+    
+    FirstAdd --> Transfer
+    UseA --> Transfer
+    UseB --> Transfer
+    
+    Transfer[转入代币到Pair]
+    Transfer --> Mint[Pair.mint铸造LP]
+    Mint --> Success[✅ 成功返回liquidity]
+    
+    style Start fill:#e1f5ff
+    style Create fill:#fff3cd
+    style FirstAdd fill:#d4edda
+    style UseA fill:#d4edda
+    style UseB fill:#d4edda
+    style RevertA fill:#f8d7da
+    style RevertB fill:#f8d7da
+    style Success fill:#51cf66,stroke:#2b8a3e,stroke-width:3px
+```
+
+### 11.3 添加流动性的比例计算
+
+**Quote公式：**
+
+```solidity
+function quote(
+    uint amountA,
+    uint reserveA,
+    uint reserveB
+) internal pure returns (uint amountB) {
+    require(amountA > 0, 'INSUFFICIENT_AMOUNT');
+    require(reserveA > 0 && reserveB > 0, 'INSUFFICIENT_LIQUIDITY');
+    
+    // ⭐ 核心：按比例计算
+    amountB = amountA.mul(reserveB) / reserveA;
+}
+```
+
+**计算逻辑可视化：**
+
+```mermaid
+graph LR
+    subgraph "池子当前状态"
+        R["储备量<br/>1000 USDC<br/>0.5 ETH<br/>比例：2000:1"]
+    end
+    
+    subgraph "用户输入"
+        I["期望添加<br/>100 USDC<br/>? ETH"]
+    end
+    
+    subgraph "计算过程"
+        C1["amountETH = amountUSDC × reserveETH / reserveUSDC"]
+        C2["= 100 × 0.5 / 1000"]
+        C3["= 0.05 ETH"]
+    end
+    
+    subgraph "结果"
+        O["实际添加<br/>100 USDC<br/>0.05 ETH<br/>✅ 保持2000:1比例"]
+    end
+    
+    R --> C1
+    I --> C1
+    C1 --> C2
+    C2 --> C3
+    C3 --> O
+    
+    style R fill:#e1f5ff
+    style I fill:#fff3cd
+    style O fill:#d4edda,stroke:#155724,stroke-width:3px
+```
 
 ---
 
-## 📚 扩展阅读
+## 12. UniswapV2Library详解
 
-- [Uniswap V2 Periphery Source](https://github.com/Uniswap/v2-periphery)
-- [EIP-2612: Permit Extension](https://eips.ethereum.org/EIPS/eip-2612)
-- [Solidity Gas Optimization](https://github.com/iskdrews/awesome-solidity-gas-optimization)
+### 12.1 Library完整函数列表
+
+```mermaid
+graph TB
+    subgraph "UniswapV2Library - 工具函数库"
+        direction TB
+        
+        subgraph "基础工具"
+            B1["sortTokens<br/>代币排序"]
+            B2["pairFor<br/>计算Pair地址"]
+            B3["getReserves<br/>获取储备量"]
+        end
+        
+        subgraph "价格计算"
+            P1["quote<br/>按比例计算"]
+        end
+        
+        subgraph "单跳计算"
+            S1["getAmountOut<br/>已知输入求输出"]
+            S2["getAmountIn<br/>已知输出求输入"]
+        end
+        
+        subgraph "多跳计算"
+            M1["getAmountsOut<br/>多跳输出"]
+            M2["getAmountsIn<br/>多跳输入"]
+        end
+    end
+    
+    B1 --> B2
+    B2 --> B3
+    B3 --> P1
+    B3 --> S1
+    B3 --> S2
+    S1 --> M1
+    S2 --> M2
+    
+    style B1 fill:#cfe2ff
+    style B2 fill:#cfe2ff
+    style B3 fill:#cfe2ff
+    style P1 fill:#d4edda
+    style S1 fill:#ffd43b
+    style S2 fill:#ffd43b
+    style M1 fill:#ff8787
+    style M2 fill:#ff8787
+```
+
+### 12.2 getAmountOut详解
+
+```solidity
+function getAmountOut(
+    uint amountIn,
+    uint reserveIn,
+    uint reserveOut
+) internal pure returns (uint amountOut) {
+    require(amountIn > 0, 'INSUFFICIENT_INPUT_AMOUNT');
+    require(reserveIn > 0 && reserveOut > 0, 'INSUFFICIENT_LIQUIDITY');
+    
+    // ⭐ 核心公式：含0.3%手续费的恒定乘积
+    uint amountInWithFee = amountIn.mul(997);
+    uint numerator = amountInWithFee.mul(reserveOut);
+    uint denominator = reserveIn.mul(1000).add(amountInWithFee);
+    amountOut = numerator / denominator;
+}
+```
+
+**公式推导可视化：**
+
+```mermaid
+graph TB
+    subgraph "数学推导"
+        F1["恒定乘积公式<br/>x · y = k"]
+        F2["考虑手续费<br/>实际输入 = amountIn × 0.997"]
+        F3["新状态<br/>(reserveIn + 0.997×amountIn) × (reserveOut - amountOut) = k"]
+        F4["展开<br/>(reserveIn + 0.997×amountIn) × (reserveOut - amountOut)<br/>= reserveIn × reserveOut"]
+        F5["解出amountOut<br/>amountOut = (0.997×amountIn × reserveOut)<br/>/ (reserveIn + 0.997×amountIn)"]
+        F6["为避免小数<br/>分子分母都×1000<br/>amountOut = (997×amountIn × reserveOut)<br/>/ (1000×reserveIn + 997×amountIn)"]
+    end
+    
+    F1 --> F2
+    F2 --> F3
+    F3 --> F4
+    F4 --> F5
+    F5 --> F6
+    
+    style F1 fill:#e1f5ff
+    style F6 fill:#51cf66,stroke:#2b8a3e,stroke-width:3px
+```
 
 ---
 
-**下一节：** 我将详细讲解每个swap函数的实现、addLiquidity的完整逻辑、Library的所有工具函数...
+## 13. TransferHelper安全封装
 
-需要我继续完善Router文档吗？还是你想先review一下这部分内容？😊
+### 13.1 为什么需要TransferHelper？
+
+```
+问题：不是所有ERC20都标准
+
+标准ERC20：
+- transfer返回bool
+- 失败时返回false或revert
+
+非标准ERC20：
+- USDT：transfer无返回值
+- BNB：transfer返回bool，但失败不revert
+- 某些代币：成功返回0，失败返回1
+
+直接调用transfer可能：
+❌ 无法正确处理返回值
+❌ 失败时不revert
+❌ 资金损失风险
+```
+
+### 13.2 safeTransfer实现
+
+```solidity
+library TransferHelper {
+    function safeTransfer(
+        address token,
+        address to,
+        uint value
+    ) internal {
+        // ⭐ 使用低级调用
+        (bool success, bytes memory data) = token.call(
+            abi.encodeWithSelector(
+                bytes4(keccak256(bytes('transfer(address,uint256)'))),
+                to,
+                value
+            )
+        );
+        
+        // ⭐ 检查返回值
+        require(
+            success && (data.length == 0 || abi.decode(data, (bool))), 
+            'TransferHelper: TRANSFER_FAILED'
+        );
+    }
+}
+```
+
+**安全检查流程：**
+
+```mermaid
+flowchart TD
+    Start[safeTransfer调用]
+    
+    Call["低级call调用<br/>token.transfer(to, value)"]
+    
+    Q1{call是否成功？<br/>success == true?}
+    Q1 -->|否| Fail1[❌ TRANSFER_FAILED]
+    Q1 -->|是| Q2
+    
+    Q2{返回值检查}
+    Q2 -->|data.length == 0| Success[✅ 成功<br/>无返回值代币<br/>如USDT]
+    Q2 -->|data.length > 0| Q3
+    
+    Q3{decode(data) == true?}
+    Q3 -->|是| Success
+    Q3 -->|否| Fail2[❌ TRANSFER_FAILED]
+    
+    Start --> Call
+    Call --> Q1
+    
+    style Start fill:#e1f5ff
+    style Success fill:#d4edda,stroke:#155724,stroke-width:3px
+    style Fail1 fill:#f8d7da
+    style Fail2 fill:#f8d7da
+```
+
+**兼容性对比：**
+
+```mermaid
+graph LR
+    subgraph "标准ERC20"
+        S1["transfer(to, value)"]
+        S2["返回：bool"]
+        S3["✅ 都兼容"]
+    end
+    
+    subgraph "USDT"
+        U1["transfer(to, value)"]
+        U2["返回：无"]
+        U3["✅ data.length==0分支"]
+    end
+    
+    subgraph "某些代币"
+        O1["transfer(to, value)"]
+        O2["返回：bool"]
+        O3["✅ decode(data)==true分支"]
+    end
+    
+    style S3 fill:#d4edda
+    style U3 fill:#d4edda
+    style O3 fill:#d4edda
+```
+
+---
+
+## 14. 完整的Swap函数族
+
+### 14.1 8个Swap函数全景
+
+```mermaid
+graph TB
+    subgraph "Swap函数族（8个）"
+        direction TB
+        
+        subgraph "精确输入（Exact Input）"
+            EI1["swapExactTokensForTokens<br/>Token → Token"]
+            EI2["swapExactETHForTokens<br/>ETH → Token"]
+            EI3["swapExactTokensForETH<br/>Token → ETH"]
+        end
+        
+        subgraph "精确输出（Exact Output）"
+            EO1["swapTokensForExactTokens<br/>Token → Token"]
+            EO2["swapETHForExactTokens<br/>ETH → Token"]
+            EO3["swapTokensForExactETH<br/>Token → ETH"]
+        end
+        
+        subgraph "支持Fee-on-Transfer"
+            FEE1["...SupportingFeeOnTransferTokens × 3"]
+        end
+    end
+    
+    EI1 -.用户知道.-> I1[输入多少]
+    EO1 -.用户知道.-> O1[输出多少]
+    FEE1 -.支持.-> F1[扣费代币]
+    
+    style EI1 fill:#51cf66
+    style EI2 fill:#51cf66
+    style EI3 fill:#51cf66
+    style EO1 fill:#339af0
+    style EO2 fill:#339af0
+    style EO3 fill:#339af0
+    style FEE1 fill:#ffd43b
+```
+
+### 14.2 函数选择指南
+
+```mermaid
+flowchart TD
+    Start[选择Swap函数]
+    
+    Q1{输入还是输出固定？}
+    Q1 -->|输入固定<br/>如：卖100 USDC| Q2
+    Q1 -->|输出固定<br/>如：买0.05 ETH| Q5
+    
+    Q2{是否涉及ETH？}
+    Q2 -->|输入是ETH| R1[swapExactETHForTokens]
+    Q2 -->|输出是ETH| R2[swapExactTokensForETH]
+    Q2 -->|都不是| Q3
+    
+    Q3{是否fee-on-transfer代币？}
+    Q3 -->|是| R3[swapExact...Supporting<br/>FeeOnTransferTokens]
+    Q3 -->|否| R4[swapExactTokensForTokens]
+    
+    Q5{是否涉及ETH？}
+    Q5 -->|输入是ETH| R5[swapETHForExactTokens]
+    Q5 -->|输出是ETH| R6[swapTokensForExactETH]
+    Q5 -->|都不是| R7[swapTokensForExactTokens]
+    
+    style R1 fill:#51cf66
+    style R2 fill:#51cf66
+    style R3 fill:#ffd43b
+    style R4 fill:#51cf66
+    style R5 fill:#339af0
+    style R6 fill:#339af0
+    style R7 fill:#339af0
+```
+
+---
+
+## 15. 审计实战：发现并修复漏洞
+
+### 15.1 案例1：deadline未检查漏洞
+
+**漏洞代码：**
+
+```solidity
+// ❌ 错误：忘记添加ensure(deadline)
+function badSwap(
+    uint amountIn,
+    uint amountOutMin,
+    address[] calldata path,
+    address to,
+    uint deadline  // 参数存在但未检查！
+) external returns (uint[] memory amounts) {
+    amounts = getAmountsOut(amountIn, path);
+    require(amounts[amounts.length - 1] >= amountOutMin);
+    // ... swap逻辑
+}
+```
+
+**攻击场景：**
+
+```mermaid
+sequenceDiagram
+    participant Attacker
+    participant Mempool
+    participant Miner
+    participant Contract
+    
+    Note over Attacker: T0时刻：ETH=$2000
+    Attacker->>Mempool: 提交swap，gasPrice=1 Gwei<br/>deadline=很远的未来
+    
+    Note over Mempool: 交易pending，等待...
+    Note over Mempool: T1时刻：1天后，ETH=$1800
+    
+    Miner->>Contract: 终于打包交易
+    Contract->>Contract: 按$1800执行（用户亏$200）
+    Contract-->>Attacker: Attacker没有deadline保护！💔
+    
+    Note over Attacker: 如果有ensure(deadline)
+    Note over Attacker: 交易会在合理时间内执行或失败
+```
+
+**修复：**
+
+```solidity
+// ✅ 正确：添加ensure modifier
+function goodSwap(..., uint deadline) 
+    external 
+    ensure(deadline)  // ← 关键！
+    returns (uint[] memory amounts) 
+{
+    // ...
+}
+```
+
+### 15.2 案例2：滑点保护缺失
+
+**漏洞代码：**
+
+```solidity
+// ❌ 错误：未检查最小输出
+function badSwap(...) external {
+    amounts = getAmountsOut(amountIn, path);
+    // 缺少：require(amounts[last] >= amountOutMin)
+    _swap(amounts, path, to);
+}
+```
+
+**攻击场景：**
+
+```mermaid
+graph LR
+    User[用户期望<br/>至少得0.048 ETH]
+    
+    Attack1[MEV机器人<br/>抢先买入]
+    Attack2[价格被推高<br/>0.05 → 0.045]
+    Result[用户实际得到<br/>0.045 ETH<br/>❌ 比期望少]
+    
+    User --> Attack1
+    Attack1 --> Attack2
+    Attack2 --> Result
+    
+    style User fill:#e1f5ff
+    style Attack1 fill:#ff8787
+    style Attack2 fill:#ff8787
+    style Result fill:#f8d7da
+```
+
+**修复：**
+
+```solidity
+// ✅ 正确：添加滑点保护
+require(
+    amounts[amounts.length - 1] >= amountOutMin,
+    'INSUFFICIENT_OUTPUT_AMOUNT'
+);
+```
+
+---
+
+## 16. 最佳实践总结
+
+### 16.1 Router开发的黄金法则
+
+```mermaid
+graph TB
+    subgraph "Router开发的10条黄金法则"
+        R1["1. 安全第一<br/>always use modifiers"]
+        R2["2. 滑点保护<br/>min/max amounts"]
+        R3["3. 截止时间<br/>prevent stale txs"]
+        R4["4. 路径验证<br/>check path.length"]
+        R5["5. 地址验证<br/>non-zero addresses"]
+        R6["6. 返回值检查<br/>SafeTransfer"]
+        R7["7. Gas优化<br/>use Library"]
+        R8["8. 用户友好<br/>ETH support"]
+        R9["9. 兼容性<br/>fee-on-transfer"]
+        R10["10. 文档完善<br/>NatSpec comments"]
+    end
+    
+    R1 --> R2
+    R2 --> R3
+    R3 --> R4
+    R4 --> R5
+    R5 --> R6
+    R6 --> R7
+    R7 --> R8
+    R8 --> R9
+    R9 --> R10
+    
+    style R1 fill:#ff8787
+    style R2 fill:#ff8787
+    style R3 fill:#ff8787
+    style R6 fill:#ff8787
+    style R7 fill:#51cf66
+    style R8 fill:#51cf66
+```
+
+---
+
+## ✅ 学习成果
+
+完成Router学习后，你将掌握：
+
+```mermaid
+mindmap
+  root((Router精通))
+    架构设计
+      门面模式
+      模板方法
+      工具类模式
+      分层架构
+    安全机制
+      5层防护
+      滑点保护
+      截止时间
+      路径验证
+      返回值检查
+    Gas优化
+      离线计算
+      批量操作
+      ETH支持
+      变量优化
+    审计能力
+      发现漏洞
+      评估风险
+      提出修复
+      最佳实践
+    实战技能
+      调用Router
+      计算路径
+      设置参数
+      优化策略
+```
+
+---
+
+## 🎓 总结
+
+**UniswapV2Router02是Periphery层的典范：**
+
+```
+核心价值：
+✅ 用户友好（简化复杂操作）
+✅ 安全可靠（5层防护机制）
+✅ Gas优化（8种优化技巧）
+✅ 设计优雅（3种设计模式）
+✅ 可扩展（可升级架构）
+
+学习价值：
+✅ 如何设计用户接口
+✅ 如何实现安全检查
+✅ 如何优化Gas消耗
+✅ 如何应用设计模式
+✅ 如何审计合约
+
+这是区块链产品设计的教科书！⭐⭐⭐⭐⭐
+```
+
+---
+
+**文档完成度：Router基础 + 进阶内容已完成！**
+
+**下一步建议：**
+1. 实战部署并测试Router
+2. 尝试发现并修复漏洞
+3. 继续学习其他章节
+
+**需要我继续添加更多Router的高级内容吗？** 🚀
+
