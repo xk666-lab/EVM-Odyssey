@@ -19,6 +19,14 @@
 7. [辅助函数](#7-辅助函数)
 8. [安全机制](#8-安全机制)
 9. [完整源码注释版](#9-完整源码注释版)
+10. [接口与库详解](#10-接口与库详解)
+    - 10.1 [IUniswapV2Callee接口（Flash Swap回调）](#101-iuniswapv2callee-接口flash-swap回调)
+    - 10.2 [IUniswapV2Pair接口（完整版）](#102-iuniswapv2pair-接口完整版)
+    - 10.3 [IUniswapV2Factory接口](#103-iuniswapv2factory-接口)
+    - 10.4 [Math库](#104-math-库)
+    - 10.5 [SafeMath库](#105-safemath-库)
+    - 10.6 [UQ112x112库](#106-uq112x112-库已在前面详细讲解)
+11. [UniswapV2ERC20深度解析](#11-uniswapv2erc20-深度解析)
 
 ---
 
@@ -1330,9 +1338,541 @@ contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
 
 ---
 
-## 10. UniswapV2ERC20 深度解析
+## 10. 接口与库详解
 
-### 10.1 为什么需要自定义ERC20？
+### 10.1 IUniswapV2Callee 接口（Flash Swap回调）
+
+**接口定义：**
+
+```solidity
+// SPDX-License-Identifier: MIT
+pragma solidity >=0.5.0;
+
+/**
+ * @title IUniswapV2Callee
+ * @notice Flash Swap回调接口
+ * @dev 任何想要接收Flash Swap的合约必须实现此接口
+ */
+interface IUniswapV2Callee {
+    /**
+     * @notice Uniswap V2 Flash Swap回调函数
+     * @dev 当swap函数的data参数不为空时会被调用
+     * @param sender 发起swap的地址（msg.sender）
+     * @param amount0 借出的token0数量
+     * @param amount1 借出的token1数量
+     * @param data 用户传入的任意数据
+     */
+    function uniswapV2Call(
+        address sender,
+        uint amount0,
+        uint amount1,
+        bytes calldata data
+    ) external;
+}
+```
+
+**为什么需要这个接口？**
+
+```
+Flash Swap的工作流程：
+
+传统借贷：
+1. 用户提供抵押品
+2. 借出资金
+3. 使用资金
+4. 还款
+
+Flash Swap（闪电贷）：
+1. 先借出资金（无抵押！）⚡
+2. 通过回调使用资金
+3. 在同一交易内还款
+4. 如果还不上，整个交易回滚
+
+IUniswapV2Callee = 回调接口
+让你在第2步使用借出的资金
+```
+
+**实现示例：**
+
+```solidity
+contract FlashSwapExample is IUniswapV2Callee {
+    address immutable factory;
+    
+    constructor(address _factory) {
+        factory = _factory;
+    }
+    
+    // 发起Flash Swap
+    function startFlashSwap(
+        address pair,
+        uint amount0Out,
+        uint amount1Out
+    ) external {
+        // data不为空，会触发回调
+        bytes memory data = abi.encode(msg.sender);
+        IUniswapV2Pair(pair).swap(amount0Out, amount1Out, address(this), data);
+    }
+    
+    // 实现回调接口
+    function uniswapV2Call(
+        address sender,
+        uint amount0,
+        uint amount1,
+        bytes calldata data
+    ) external override {
+        // 1. 验证调用者是合法的Pair
+        address token0 = IUniswapV2Pair(msg.sender).token0();
+        address token1 = IUniswapV2Pair(msg.sender).token1();
+        address pair = pairFor(factory, token0, token1);
+        require(msg.sender == pair, 'INVALID_PAIR');
+        
+        // 2. 验证sender
+        address originalSender = abi.decode(data, (address));
+        require(sender == address(this), 'INVALID_SENDER');
+        
+        // 3. 使用借到的代币做套利
+        // 这里可以：
+        // - 在其他DEX卖出
+        // - 清算抵押品
+        // - 套利交易
+        // ... 任何操作
+        
+        // 例如：简单的套利
+        if (amount0 > 0) {
+            // 借到了token0，去其他DEX卖
+            uint amountRequired = getAmountIn(amount0); // 计算需要还款的amount1
+            // ... 执行套利
+            IERC20(token1).transfer(pair, amountRequired); // 还款
+        }
+        
+        // 4. 如果还款不足，Pair.swap会revert
+        // 整个交易回滚，没有风险！
+    }
+}
+```
+
+**安全检查必须做：**
+
+```solidity
+function uniswapV2Call(...) external {
+    // ⚠️ 检查1：验证调用者是真的Pair
+    address token0 = IUniswapV2Pair(msg.sender).token0();
+    address token1 = IUniswapV2Pair(msg.sender).token1();
+    address pair = pairFor(factory, token0, token1);
+    require(msg.sender == pair, 'Unauthorized');
+    
+    // ⚠️ 检查2：验证sender（如果需要）
+    require(sender == trustedAddress, 'Invalid sender');
+    
+    // ... 使用借到的资金
+    
+    // ⚠️ 检查3：确保还够款
+    // Pair会自动验证，如果不够会revert
+}
+
+如果不做这些检查：
+❌ 任何人可以调用你的uniswapV2Call
+❌ 可能被攻击者利用
+❌ 资金风险
+```
+
+**Flash Swap常见应用：**
+
+```
+1. 套利 ⭐⭐⭐⭐⭐
+   - 在Uniswap借代币
+   - 在其他DEX/CEX卖更高价
+   - 还款给Uniswap
+   - 赚取差价
+
+2. 清算 ⭐⭐⭐⭐
+   - 借USDC
+   - 清算抵押品获得ETH
+   - 卖ETH换USDC
+   - 还款+获利
+
+3. 自我清算 ⭐⭐⭐
+   - 借款还掉自己的债务
+   - 提取抵押品
+   - 卖抵押品
+   - 还Flash Swap
+
+4. 抵押品互换 ⭐⭐⭐
+   - 借新抵押品代币
+   - 存入新抵押品
+   - 提取旧抵押品
+   - 卖掉还款
+```
+
+### 10.2 IUniswapV2Pair 接口（完整版）
+
+```solidity
+// SPDX-License-Identifier: MIT
+pragma solidity >=0.5.0;
+
+interface IUniswapV2Pair {
+    // ===== 事件 =====
+    
+    /// @dev 铸造LP代币时触发
+    event Mint(address indexed sender, uint amount0, uint amount1);
+    
+    /// @dev 销毁LP代币时触发
+    event Burn(address indexed sender, uint amount0, uint amount1, address indexed to);
+    
+    /// @dev 交换时触发
+    event Swap(
+        address indexed sender,
+        uint amount0In,
+        uint amount1In,
+        uint amount0Out,
+        uint amount1Out,
+        address indexed to
+    );
+    
+    /// @dev 储备量同步时触发
+    event Sync(uint112 reserve0, uint112 reserve1);
+
+    // ===== 查询函数 =====
+    
+    /// @notice 最小流动性（永久锁定）
+    function MINIMUM_LIQUIDITY() external pure returns (uint);
+    
+    /// @notice Factory合约地址
+    function factory() external view returns (address);
+    
+    /// @notice Token0地址
+    function token0() external view returns (address);
+    
+    /// @notice Token1地址
+    function token1() external view returns (address);
+    
+    /// @notice 获取储备量和最后更新时间
+    /// @return reserve0 Token0储备量
+    /// @return reserve1 Token1储备量
+    /// @return blockTimestampLast 最后更新的区块时间戳
+    function getReserves() external view returns (
+        uint112 reserve0, 
+        uint112 reserve1, 
+        uint32 blockTimestampLast
+    );
+    
+    /// @notice Token0的累积价格（TWAP用）
+    function price0CumulativeLast() external view returns (uint);
+    
+    /// @notice Token1的累积价格（TWAP用）
+    function price1CumulativeLast() external view returns (uint);
+    
+    /// @notice 上次mint/burn时的k值（协议费计算用）
+    function kLast() external view returns (uint);
+
+    // ===== 状态改变函数 =====
+    
+    /// @notice 添加流动性
+    /// @dev 需要先将代币转入Pair
+    /// @param to LP代币接收地址
+    /// @return liquidity 铸造的LP代币数量
+    function mint(address to) external returns (uint liquidity);
+    
+    /// @notice 移除流动性
+    /// @dev 需要先将LP代币转入Pair
+    /// @param to 代币接收地址
+    /// @return amount0 返还的token0数量
+    /// @return amount1 返还的token1数量
+    function burn(address to) external returns (uint amount0, uint amount1);
+    
+    /// @notice 交换代币
+    /// @param amount0Out 输出token0数量
+    /// @param amount1Out 输出token1数量
+    /// @param to 接收地址
+    /// @param data 回调数据（Flash Swap）
+    function swap(
+        uint amount0Out, 
+        uint amount1Out, 
+        address to, 
+        bytes calldata data
+    ) external;
+    
+    /// @notice 强制储备量与余额同步
+    /// @dev 用于处理异常情况（如deflationary token）
+    function skim(address to) external;
+    
+    /// @notice 强制余额与储备量同步
+    /// @dev 用于处理异常情况
+    function sync() external;
+
+    /// @notice 初始化Pair
+    /// @dev 只能由Factory调用一次
+    function initialize(address, address) external;
+}
+```
+
+**每个函数的用途：**
+
+| 函数 | 调用者 | 用途 | 返回值 |
+|------|--------|------|--------|
+| `mint()` | Router | 添加流动性 | LP代币数量 |
+| `burn()` | Router | 移除流动性 | 两种代币数量 |
+| `swap()` | Router/用户 | 交换代币 | 无 |
+| `skim()` | 任何人 | 提取多余代币 | 无 |
+| `sync()` | 任何人 | 同步储备量 | 无 |
+| `initialize()` | Factory | 初始化Pair | 无 |
+
+### 10.3 IUniswapV2Factory 接口
+
+```solidity
+// SPDX-License-Identifier: MIT
+pragma solidity >=0.5.0;
+
+interface IUniswapV2Factory {
+    // ===== 事件 =====
+    
+    /// @dev 创建新Pair时触发
+    /// @param token0 Token0地址（地址较小的）
+    /// @param token1 Token1地址（地址较大的）
+    /// @param pair 新创建的Pair地址
+    /// @param 第4个参数是allPairs数组的长度
+    event PairCreated(
+        address indexed token0, 
+        address indexed token1, 
+        address pair, 
+        uint
+    );
+
+    // ===== 查询函数 =====
+    
+    /// @notice 协议费接收地址
+    /// @return feeTo 接收地址（address(0)表示未开启）
+    function feeTo() external view returns (address);
+    
+    /// @notice 协议费设置者地址
+    function feeToSetter() external view returns (address);
+
+    /// @notice 获取token对的Pair地址
+    /// @param tokenA Token A地址
+    /// @param tokenB Token B地址
+    /// @return pair Pair地址（不存在返回address(0)）
+    function getPair(address tokenA, address tokenB) 
+        external 
+        view 
+        returns (address pair);
+    
+    /// @notice 获取指定索引的Pair地址
+    /// @param 索引
+    /// @return pair Pair地址
+    function allPairs(uint) external view returns (address pair);
+    
+    /// @notice 获取Pair总数
+    function allPairsLength() external view returns (uint);
+
+    // ===== 状态改变函数 =====
+    
+    /// @notice 创建新的Pair
+    /// @param tokenA Token A地址
+    /// @param tokenB Token B地址
+    /// @return pair 新创建的Pair地址
+    function createPair(address tokenA, address tokenB) 
+        external 
+        returns (address pair);
+
+    /// @notice 设置协议费接收地址
+    /// @dev 只能由feeToSetter调用
+    function setFeeTo(address) external;
+    
+    /// @notice 设置协议费设置者地址
+    /// @dev 只能由当前feeToSetter调用
+    function setFeeToSetter(address) external;
+}
+```
+
+### 10.4 Math 库
+
+```solidity
+// SPDX-License-Identifier: MIT
+pragma solidity =0.5.16;
+
+/**
+ * @title Math
+ * @notice 数学工具库
+ * @dev Babylonian平方根算法
+ */
+library Math {
+    /// @notice 返回两个数中的最小值
+    function min(uint x, uint y) internal pure returns (uint z) {
+        z = x < y ? x : y;
+    }
+
+    /// @notice 计算平方根（向下取整）
+    /// @dev 使用Babylonian方法（牛顿法）
+    /// @param y 被开方数
+    /// @return z 平方根
+    function sqrt(uint y) internal pure returns (uint z) {
+        if (y > 3) {
+            z = y;
+            uint x = y / 2 + 1;
+            while (x < z) {
+                z = x;
+                x = (y / x + x) / 2;
+            }
+        } else if (y != 0) {
+            z = 1;
+        }
+        // else z = 0 (默认值)
+    }
+}
+```
+
+**平方根算法详解：**
+
+```
+Babylonian Method（巴比伦方法 = 牛顿法）：
+
+求 √y 的步骤：
+
+1. 初始猜测：x₀ = y
+2. 迭代公式：x_{n+1} = (x_n + y/x_n) / 2
+3. 直到收敛：当 x_{n+1} >= x_n 时停止
+
+例子：求 √16
+x₀ = 16
+x₁ = (16 + 16/16) / 2 = (16 + 1) / 2 = 8.5
+x₂ = (8.5 + 16/8.5) / 2 = (8.5 + 1.88) / 2 = 5.19
+x₃ = (5.19 + 16/5.19) / 2 = (5.19 + 3.08) / 2 = 4.14
+x₄ = (4.14 + 16/4.14) / 2 = (4.14 + 3.86) / 2 = 4.00
+收敛！√16 = 4
+
+为什么快？
+- 每次迭代，精度翻倍
+- log(n)次迭代即可
+- 比逐个尝试快得多
+
+用途：
+首次添加流动性时：
+liquidity = √(amount0 × amount1) - MINIMUM_LIQUIDITY
+```
+
+**特殊情况处理：**
+
+```solidity
+if (y > 3) {
+    // 正常情况：使用迭代
+} else if (y != 0) {
+    z = 1;  // y = 1,2,3 时，向下取整为1
+}
+// y = 0 时，z = 0（默认值）
+
+为什么 y <= 3 特殊处理？
+√0 = 0
+√1 = 1
+√2 = 1.414... → 向下取整 = 1
+√3 = 1.732... → 向下取整 = 1
+
+直接返回1更省Gas！
+```
+
+### 10.5 SafeMath 库
+
+```solidity
+// SPDX-License-Identifier: MIT
+pragma solidity =0.5.16;
+
+/**
+ * @title SafeMath
+ * @notice 安全数学运算库（防溢出）
+ * @dev Solidity 0.5需要手动检查溢出，0.8+自动检查
+ */
+library SafeMath {
+    /// @notice 安全加法
+    function add(uint x, uint y) internal pure returns (uint z) {
+        require((z = x + y) >= x, 'ds-math-add-overflow');
+    }
+
+    /// @notice 安全减法
+    function sub(uint x, uint y) internal pure returns (uint z) {
+        require((z = x - y) <= x, 'ds-math-sub-underflow');
+    }
+
+    /// @notice 安全乘法
+    function mul(uint x, uint y) internal pure returns (uint z) {
+        require(y == 0 || (z = x * y) / y == x, 'ds-math-mul-overflow');
+    }
+}
+```
+
+**为什么需要SafeMath？**
+
+```
+Solidity 0.5 及之前：
+uint a = 2**256 - 1;  // 最大值
+a = a + 1;            // 溢出！变成0 ⚠️
+没有任何错误提示
+
+Solidity 0.8+：
+uint a = 2**256 - 1;
+a = a + 1;  // 自动revert ✅
+
+V2使用0.5，所以需要SafeMath
+```
+
+**溢出示例：**
+
+```solidity
+// 不安全的加法
+uint256 a = type(uint256).max;  // 2^256 - 1
+uint256 b = 1;
+uint256 c = a + b;  // 0.5版本：c = 0（溢出）
+                    // 0.8版本：revert
+
+// SafeMath保护
+c = a.add(b);  // 任何版本都会revert ✅
+```
+
+**溢出检查原理：**
+
+```solidity
+// 加法检查
+function add(uint x, uint y) internal pure returns (uint z) {
+    require((z = x + y) >= x, 'overflow');
+    // 如果溢出，z会小于x（回绕）
+}
+
+// 减法检查
+function sub(uint x, uint y) internal pure returns (uint z) {
+    require((z = x - y) <= x, 'underflow');
+    // 如果下溢，z会大于x（回绕）
+}
+
+// 乘法检查
+function mul(uint x, uint y) internal pure returns (uint z) {
+    require(y == 0 || (z = x * y) / y == x, 'overflow');
+    // 如果溢出，z/y != x
+}
+```
+
+### 10.6 UQ112x112 库（已在前面详细讲解）
+
+```solidity
+library UQ112x112 {
+    uint224 constant Q112 = 2**112;
+
+    // 编码：整数 → 定点数
+    function encode(uint112 y) internal pure returns (uint224 z) {
+        z = uint224(y) * Q112;
+    }
+
+    // 除法：定点数 / 整数 → 定点数
+    function uqdiv(uint224 x, uint112 y) internal pure returns (uint224 z) {
+        z = x / uint224(y);
+    }
+}
+```
+
+详细解释见前面的章节。
+
+---
+
+## 11. UniswapV2ERC20 深度解析
+
+### 11.1 为什么需要自定义ERC20？
 
 ```
 Uniswap V2的LP代币不是普通的ERC20，而是：
@@ -1350,7 +1890,7 @@ Uniswap V2的LP代币不是普通的ERC20，而是：
 - 每个字节都精打细算
 ```
 
-### 10.2 完整合约源码
+### 11.2 完整合约源码
 
 ```solidity
 // SPDX-License-Identifier: MIT
@@ -1480,7 +2020,7 @@ contract UniswapV2ERC20 is IUniswapV2ERC20 {
 }
 ```
 
-### 10.3 EIP-2612 Permit 深度解析
+### 11.3 EIP-2612 Permit 深度解析
 
 **什么是EIP-2612？**
 
@@ -1549,7 +2089,7 @@ function permit(
 }
 ```
 
-### 10.4 EIP-712 域分隔符（Domain Separator）
+### 11.4 EIP-712 域分隔符（Domain Separator）
 
 **什么是Domain Separator？**
 
@@ -1605,7 +2145,7 @@ constructor() public {
 全都不同！✅ 签名无法跨合约使用
 ```
 
-### 10.5 Nonce防重放攻击
+### 11.5 Nonce防重放攻击
 
 **什么是Nonce？**
 
@@ -1647,7 +2187,7 @@ nonces[owner]++  // 先使用，后自增
 // 下次签名需要用新的nonce
 ```
 
-### 10.6 签名格式标准：EIP-191 + EIP-712
+### 11.6 签名格式标准：EIP-191 + EIP-712
 
 **为什么是这个格式？**
 
@@ -1995,7 +2535,7 @@ structHash = 具体内容（带类型）
 不是随意设计的，而是社区经过深思熟虑的标准！
 ```
 
-### 10.7 完整使用流程
+### 11.7 完整使用流程
 
 **场景：用户移除流动性（使用permit）**
 
@@ -2047,7 +2587,7 @@ await router.removeLiquidityWithPermit(
 // 用户只支付1次Gas！✅
 ```
 
-### 10.8 安全性分析
+### 11.8 安全性分析
 
 **为什么安全？**
 
@@ -2093,7 +2633,7 @@ await router.removeLiquidityWithPermit(
 建议：不要分享签名数据
 ```
 
-### 10.9 与标准ERC20的对比
+### 11.9 与标准ERC20的对比
 
 | 特性 | 标准ERC20 | UniswapV2ERC20 |
 |------|-----------|----------------|
@@ -2133,7 +2673,7 @@ function transferFrom(address from, address to, uint value) external returns (bo
 ✅ 常用于Router等可信合约
 ```
 
-### 10.10 实战：如何使用permit
+### 11.10 实战：如何使用permit
 
 **前端集成示例：**
 
