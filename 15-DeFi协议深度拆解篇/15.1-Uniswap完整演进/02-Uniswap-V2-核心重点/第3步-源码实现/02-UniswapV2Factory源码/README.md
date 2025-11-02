@@ -64,19 +64,39 @@ UniswapV2Factory是V2的核心管理合约：
 
 ### 1.3 文件结构
 
-```
-UniswapV2Factory.sol
-├── 状态变量
-│   ├── feeTo (协议费接收者)
-│   ├── feeToSetter (管理员)
-│   ├── getPair (Pair地址映射)
-│   └── allPairs (所有Pair数组)
-├── 核心函数
-│   ├── createPair() (创建Pair)
-│   ├── setFeeTo() (设置费用)
-│   └── setFeeToSetter() (设置管理员)
-└── 查询函数
-    └── allPairsLength() (Pair总数)
+```mermaid
+graph TB
+    subgraph Factory["UniswapV2Factory.sol"]
+        direction TB
+        
+        subgraph State["状态变量"]
+            S1["feeTo<br/>协议费接收者"]
+            S2["feeToSetter<br/>管理员"]
+            S3["getPair<br/>Pair地址映射"]
+            S4["allPairs<br/>所有Pair数组"]
+        end
+        
+        subgraph Core["核心函数"]
+            C1["createPair()<br/>创建新Pair"]
+            C2["setFeeTo()<br/>设置协议费"]
+            C3["setFeeToSetter()<br/>设置管理员"]
+        end
+        
+        subgraph Query["查询函数"]
+            Q1["allPairsLength()<br/>Pair总数"]
+        end
+    end
+    
+    C1 --> S3
+    C1 --> S4
+    C2 --> S1
+    C3 --> S2
+    Q1 --> S4
+    
+    style Factory fill:#e1f5ff,stroke:#1971c2,stroke-width:2px
+    style State fill:#fff3cd,stroke:#856404
+    style Core fill:#d4edda,stroke:#155724
+    style Query fill:#cfe2ff,stroke:#004085
 ```
 
 ---
@@ -413,6 +433,62 @@ Pair地址 = keccak256(
 )[12:]  // 取后20字节
 ```
 
+**可视化计算流程：**
+
+```mermaid
+graph LR
+    subgraph "输入参数"
+        I1["0xFF<br/>(固定前缀)"]
+        I2["Factory地址<br/>0x5C69..."]
+        I3["token0<br/>0xA0b8..."]
+        I4["token1<br/>0xC02a..."]
+        I5["Pair字节码<br/>creationCode"]
+    end
+    
+    subgraph "第1步：计算salt"
+        S1["keccak256(token0, token1)"]
+    end
+    
+    subgraph "第2步：计算initCodeHash"
+        S2["keccak256(Pair字节码)"]
+    end
+    
+    subgraph "第3步：组合所有参数"
+        S3["abi.encodePacked(<br/>0xFF,<br/>factory,<br/>salt,<br/>initCodeHash<br/>)"]
+    end
+    
+    subgraph "第4步：最终哈希"
+        S4["keccak256(组合数据)"]
+    end
+    
+    subgraph "第5步：提取地址"
+        S5["取后20字节<br/>= Pair地址"]
+    end
+    
+    I3 --> S1
+    I4 --> S1
+    I5 --> S2
+    
+    I1 --> S3
+    I2 --> S3
+    S1 --> S3
+    S2 --> S3
+    
+    S3 --> S4
+    S4 --> S5
+    
+    style I1 fill:#fff3cd
+    style I2 fill:#fff3cd
+    style I3 fill:#fff3cd
+    style I4 fill:#fff3cd
+    style I5 fill:#fff3cd
+    style S1 fill:#d4edda
+    style S2 fill:#d4edda
+    style S3 fill:#cfe2ff
+    style S4 fill:#e7d4f7
+    style S5 fill:#ffc7ce
+```
+
 **完整计算流程：**
 
 ```solidity
@@ -506,21 +582,88 @@ bytes32 initCodeHash = keccak256(type(UniswapV2Pair).creationCode);
 
 ### 5.1 版本演进历史
 
+**Solidity版本演进时间线：**
+
+```mermaid
+timeline
+    title Solidity create2 演进历史
+    
+    section 早期版本
+        2019 Q1 : Solidity 0.5.x
+                : 必须使用assembly
+                : 手动内存管理
+                : Uniswap V2选择此版本
+    
+    section 语法改进
+        2020 Q1 : Solidity 0.6.2
+                : 引入new{salt}()语法
+                : 编译器自动处理
+                : 更安全易读
+    
+    section 重大升级
+        2020 Q4 : Solidity 0.8.0
+                : 默认溢出检查
+                : Custom Errors (0.8.4)
+                : 严格类型检查
+    
+    section 当前推荐
+        2023+ : Solidity 0.8.20+
+              : 成熟稳定
+              : 最佳实践
+              : 推荐使用
 ```
-Solidity 0.5.x (Uniswap V2使用)
-├─ create2不是关键字
-├─ 必须使用内联汇编(assembly)
-└─ 需要手动处理内存布局
 
-Solidity 0.6.2+ (引入原生create2)
-├─ new Contract{salt: ...}() 语法
-├─ 编译器自动处理细节
-└─ 更安全、更易读
+**版本特性对比：**
 
-Solidity 0.8.0+ (当前推荐)
-├─ 默认溢出检查
-├─ 更严格的类型检查
-└─ 更好的错误处理
+```mermaid
+graph TB
+    subgraph "0.5.x (2019)"
+        V05["Solidity 0.5.16"]
+        F051["❌ 必须用assembly"]
+        F052["❌ 手动SafeMath"]
+        F053["❌ 需要理解EVM"]
+        F054["✅ Gas最优"]
+    end
+    
+    subgraph "0.6.x (2020)"
+        V06["Solidity 0.6.2+"]
+        F061["✅ 原生create2"]
+        F062["❌ 仍需SafeMath"]
+        F063["✅ 类型安全"]
+        F064["⚠️ Gas +2%"]
+    end
+    
+    subgraph "0.8.x (2020+)"
+        V08["Solidity 0.8.20"]
+        F081["✅ 原生create2"]
+        F082["✅ 自动溢出检查"]
+        F083["✅ Custom Errors"]
+        F084["✅ try/catch"]
+        F085["⚠️ Gas +3%"]
+    end
+    
+    V05 --> V06
+    V06 --> V08
+    
+    V05 --- F051
+    V05 --- F052
+    V05 --- F053
+    V05 --- F054
+    
+    V06 --- F061
+    V06 --- F062
+    V06 --- F063
+    V06 --- F064
+    
+    V08 --- F081
+    V08 --- F082
+    V08 --- F083
+    V08 --- F084
+    V08 --- F085
+    
+    style V05 fill:#f8d7da
+    style V06 fill:#fff3cd
+    style V08 fill:#d4edda
 ```
 
 ### 5.2 语法对比：三种create2实现方式
@@ -1008,6 +1151,87 @@ if (token0 == address(0)) revert ZeroAddress();
 
 ### 5.8 最佳实践建议
 
+**版本选择决策流程：**
+
+```mermaid
+flowchart TD
+    Start["选择Solidity版本"]
+    
+    Q1{"是否是新项目？"}
+    Q2{"是否追求<br/>极致Gas优化？"}
+    Q3{"团队是否熟悉<br/>assembly？"}
+    Q4{"是否已部署<br/>且已审计？"}
+    Q5{"是否核心<br/>合约？"}
+    
+    R1["✅ 使用 0.8.20+<br/>原生create2<br/>custom errors<br/>最佳选择！"]
+    R2["⚠️ 考虑 0.5.x<br/>assembly create2<br/>需要专业知识"]
+    R3["✅ 使用 0.8.20+<br/>安全>Gas<br/>推荐选择"]
+    R4["❌ 保持原版本<br/>不要升级<br/>已审计代码"]
+    R5["✅ 新Periphery<br/>用 0.8.x<br/>Core保持不变"]
+    
+    Start --> Q1
+    Q1 -->|是| Q2
+    Q1 -->|否| Q4
+    
+    Q2 -->|是| Q3
+    Q2 -->|否| R1
+    
+    Q3 -->|是| R2
+    Q3 -->|否| R3
+    
+    Q4 -->|是| R4
+    Q4 -->|否| Q5
+    
+    Q5 -->|是| R1
+    Q5 -->|否| R5
+    
+    style Start fill:#e1f5ff
+    style R1 fill:#d4edda,stroke:#155724,stroke-width:3px
+    style R2 fill:#fff3cd
+    style R3 fill:#d4edda,stroke:#155724,stroke-width:2px
+    style R4 fill:#f8d7da
+    style R5 fill:#cfe2ff
+```
+
+**推荐总结：**
+
+```mermaid
+graph LR
+    subgraph "新项目 ⭐⭐⭐⭐⭐"
+        N1["Solidity 0.8.20+"]
+        N2["原生 create2"]
+        N3["Custom Errors"]
+        N4["自动溢出检查"]
+    end
+    
+    subgraph "现有项目"
+        E1["Core合约"]
+        E2["保持原版本"]
+        E3["Periphery合约"]
+        E4["可升级到0.8.x"]
+    end
+    
+    subgraph "权衡考虑"
+        T1["Gas差异: <3%"]
+        T2["安全性: 0.8.x更好"]
+        T3["可维护性: 0.8.x更好"]
+        T4["审计成本: 需重新审计"]
+    end
+    
+    N1 --> N2
+    N2 --> N3
+    N3 --> N4
+    
+    E1 --> E2
+    E3 --> E4
+    
+    style N1 fill:#d4edda,stroke:#155724,stroke-width:3px
+    style E2 fill:#f8d7da
+    style E4 fill:#d4edda
+```
+
+**具体建议：**
+
 ```
 对于新项目：
 ✅ 使用Solidity 0.8.20+
@@ -1224,6 +1448,48 @@ address pair = UniswapV2Library.pairFor(factory, tokenA, tokenB);
 
 ### 8.2 优化2：双向映射
 
+**双向映射可视化：**
+
+```mermaid
+graph TD
+    subgraph "创建Pair时（只执行1次）"
+        direction LR
+        Create["createPair(USDC, WETH)"]
+        Sort["排序<br/>token0=USDC<br/>token1=WETH"]
+        Deploy["部署Pair<br/>0xPair123..."]
+        Map1["getPair[USDC][WETH]<br/>= 0xPair123"]
+        Map2["getPair[WETH][USDC]<br/>= 0xPair123"]
+        
+        Create --> Sort
+        Sort --> Deploy
+        Deploy --> Map1
+        Deploy --> Map2
+    end
+    
+    subgraph "查询Pair（执行N次）"
+        direction TB
+        Q1["getPair(USDC, WETH)"]
+        Q2["getPair(WETH, USDC)"]
+        R["返回 0xPair123"]
+        
+        Q1 --> R
+        Q2 --> R
+    end
+    
+    Map1 -.支持.-> Q1
+    Map2 -.支持.-> Q2
+    
+    style Create fill:#fff3cd
+    style Deploy fill:#d4edda
+    style Map1 fill:#cfe2ff
+    style Map2 fill:#cfe2ff
+    style Q1 fill:#ffc7ce
+    style Q2 fill:#ffc7ce
+    style R fill:#d4edda
+```
+
+**代码实现：**
+
 ```solidity
 getPair[token0][token1] = pair;
 getPair[token1][token0] = pair;  // 多花2100 Gas创建时
@@ -1234,9 +1500,35 @@ function getPair(address tokenA, address tokenB) public view returns (address) {
 }
 ```
 
-**权衡：**
+**权衡分析：**
+
+```mermaid
+graph LR
+    subgraph "单向映射（假设）"
+        S1["查询时需要排序<br/>Gas: 200"]
+        S2["创建时只存1次<br/>Gas: 2100"]
+    end
+    
+    subgraph "双向映射（V2实际）"
+        D1["查询时直接读取<br/>Gas: 100"]
+        D2["创建时存2次<br/>Gas: 4200"]
+    end
+    
+    subgraph "长期收益"
+        C["创建1次 + 查询1000次<br/>单向: 2100 + 200×1000 = 202,100<br/>双向: 4200 + 100×1000 = 104,200<br/>节省: 97,900 Gas!"]
+    end
+    
+    S1 --> C
+    S2 --> C
+    D1 --> C
+    D2 --> C
+    
+    style C fill:#d4edda,stroke:#155724,stroke-width:3px
+```
+
+**结论：**
 - 创建时多花：2100 Gas（1次SSTORE）
-- 查询时节省：200 Gas（避免排序判断）
+- 查询时节省：100 Gas（避免排序判断）
 - 由于查询频率 >> 创建频率，总体节省！
 
 ### 8.3 优化3：内联汇编使用create2
@@ -1290,6 +1582,79 @@ V2选择：
 | 查询Pair地址 | `factory.getPair()` (2100) | `pairFor()` (200) | 1900 Gas |
 | 创建Pair | `new Pair()` (~250k) | `create2` (~245k) | 5k Gas |
 | 双向映射查询 | 排序+查询 (2300) | 直接查询 (2100) | 200 Gas |
+
+**Gas优化可视化对比：**
+
+```mermaid
+graph TB
+    subgraph "优化1：create2地址预测"
+        O1A["传统方式<br/>factory.getPair()<br/>2100 Gas"]
+        O1B["V2方式<br/>pairFor()计算<br/>200 Gas"]
+        O1C["节省<br/>1900 Gas<br/>90%↓"]
+    end
+    
+    subgraph "优化2：双向映射"
+        O2A["单向映射<br/>排序+查询<br/>2300 Gas"]
+        O2B["双向映射<br/>直接查询<br/>2100 Gas"]
+        O2C["节省<br/>200 Gas<br/>9%↓"]
+    end
+    
+    subgraph "优化3：Custom Errors"
+        O3A["require+string<br/>23,500 Gas"]
+        O3B["custom error<br/>142 Gas"]
+        O3C["节省<br/>23,358 Gas<br/>99.4%↓"]
+    end
+    
+    subgraph "优化4：Indexed参数"
+        O4A["所有参数indexed<br/>+1500 Gas"]
+        O4B["精选参数indexed<br/>+750 Gas"]
+        O4C["节省<br/>750 Gas<br/>50%↓"]
+    end
+    
+    O1A --> O1C
+    O1B --> O1C
+    O2A --> O2C
+    O2B --> O2C
+    O3A --> O3C
+    O3B --> O3C
+    O4A --> O4C
+    O4B --> O4C
+    
+    style O1C fill:#d4edda,stroke:#155724,stroke-width:3px
+    style O2C fill:#d4edda,stroke:#155724,stroke-width:3px
+    style O3C fill:#d4edda,stroke:#155724,stroke-width:3px
+    style O4C fill:#d4edda,stroke:#155724,stroke-width:3px
+```
+
+**总体Gas节省示例（创建+查询1000次）：**
+
+```mermaid
+graph LR
+    subgraph "传统方案"
+        T1["创建: 250,000"]
+        T2["查询×1000: 2,100,000"]
+        T3["错误×10: 235,000"]
+        T4["总计: 2,585,000 Gas"]
+    end
+    
+    subgraph "V2优化方案"
+        V1["创建: 245,000"]
+        V2["查询×1000: 200,000"]
+        V3["错误×10: 1,420"]
+        V4["总计: 446,420 Gas"]
+    end
+    
+    subgraph "节省效果"
+        S["节省: 2,138,580 Gas<br/>82.7% ↓<br/>约 $150 (150 Gwei)"]
+    end
+    
+    T4 --> S
+    V4 --> S
+    
+    style T4 fill:#f8d7da
+    style V4 fill:#d4edda
+    style S fill:#cfe2ff,stroke:#004085,stroke-width:4px
+```
 
 ---
 

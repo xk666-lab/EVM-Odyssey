@@ -2,8 +2,8 @@
 pragma solidity ^0.8.26;
 
 
-import './interfaces/IUniswapV2Factory.sol';
-import './UniswapV2Pair.sol';
+import "./interfaces/IUniswapV2Factory.sol";
+import "./UniswapV2Pair.sol";
 import "./interfaces/IUniswapV2Pair.sol";
 contract UniswapV2Factory is IUniswapV2Factory{
  address public feeTo;
@@ -52,10 +52,6 @@ allPairs.push(pair);
 emit PairCreated(token0, token1, pair,all);
 
 }
-
-
-
-
     function setFeeTo(address _feeTo) external {
         require(msg.sender == feeToSetter, 'UniswapV2: FORBIDDEN');
         feeTo = _feeTo;
@@ -67,3 +63,7 @@ emit PairCreated(token0, token1, pair,all);
     }
 
 }
+
+
+
+
